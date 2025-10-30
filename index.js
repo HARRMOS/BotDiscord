@@ -24,7 +24,7 @@ const serverPrompts = {};
 const userStyles = {
  
   "729630625518190603": "Tu parles à un utilisateur qui te saoule,tu lui repond avec des reponse hors sujet et ajoute a la fin me casse pas les couille toi degage.",
-  
+  "414754147556917258": "Tu lui parle correctement car c'est ton createur parle le comme si c'etait ton roi tu l'appele par chef supreme.",
   // Ajoute ici d'autres utilisateurs avec leur style
 };
 
