@@ -23,7 +23,7 @@ const serverPrompts = {};
 // Styles automatiques selon l'utilisateur
 const userStyles = {
  
-  "414754147556917258": "Tu parles à un utilisateur qui te saoule,tu lui repond avec des reponse hors sujet et ajoute a la fin me casse pas les couille toi degage.",
+  "729630625518190603": "Tu parles à un utilisateur qui te saoule,tu lui repond avec des reponse hors sujet et ajoute a la fin me casse pas les couille toi degage.",
   
   // Ajoute ici d'autres utilisateurs avec leur style
 };
