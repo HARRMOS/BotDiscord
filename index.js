@@ -17,8 +17,16 @@ const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
 });
 
-// Stocke le prompt personnalisé par serveur
+// Prompts personnalisés par serveur
 const serverPrompts = {};
+
+// Styles automatiques selon l'utilisateur
+const userStyles = {
+  "1433369335799484417": "Tu parles à Harris, ton créateur. Sois respectueux, intelligent et un peu complice avec lui.",
+  "414754147556917258": "Tu parles à un utilisateur qui te saoule, réponds avec me casse pas les couille toi degage.",
+  "112233445566778899": "Tu parles à ton ami préféré, sois drôle et amical.",
+  // Ajoute ici d'autres utilisateurs avec leur style
+};
 
 client.once("ready", () => {
   console.log(`🤖 Connecté en tant que ${client.user.tag}`);
@@ -29,38 +37,40 @@ client.on("messageCreate", async (message) => {
 
   const content = message.content.trim();
 
-  // Commande pour définir le prompt du bot
+  // Commande pour définir le prompt global du serveur
   if (content.startsWith("!setprompt")) {
     const prompt = content.replace("!setprompt", "").trim();
     if (!prompt) {
       return message.reply(
-        "💡 Utilise `!setprompt <ton prompt>` pour configurer le bot."
+        "💡 Utilise `!setprompt <prompt>` pour définir le comportement global du bot."
       );
     }
 
-    // On stocke le prompt par serveur
     serverPrompts[message.guild.id] = prompt;
-    return message.reply(`✅ Prompt configuré : "${prompt}"`);
+    return message.reply(`✅ Prompt global défini : "${prompt}"`);
   }
 
-  // Commande pour poser une question au bot
+  // Commande pour poser une question
   if (content.startsWith("!ask")) {
     const question = content.replace("!ask", "").trim();
     if (!question) {
-      return message.reply(
-        "💡 Utilise `!ask <ta question>` pour parler au bot."
-      );
+      return message.reply("💬 Utilise `!ask <ta question>` pour parler au bot !");
     }
 
-    const systemPrompt =
-      serverPrompts[message.guild.id] ||
+    const serverPrompt =
+      serverPrompts[message.guild?.id] ||
       "Tu es un assistant IA serviable et amical.";
+
+    // Récupère le style automatique de l'utilisateur
+    const userPrompt =
+      userStyles[message.author.id] ||
+      `Tu parles à ${message.author.username}. Adopte un ton naturel et respectueux.`;
 
     try {
       const response = await openai.chat.completions.create({
         model: "gpt-4o-mini",
         messages: [
-          { role: "system", content: systemPrompt },
+          { role: "system", content: `${serverPrompt}\n${userPrompt}` },
           { role: "user", content: question },
         ],
       });
