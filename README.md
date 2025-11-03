@@ -1,13 +1,15 @@
-# Bot Discord avec Gemini et Support Vocal
+# Bot Discord avec OpenAI et Support Vocal
 
-Bot Discord qui utilise Google Gemini pour les conversations et supporte les interactions vocales.
+Bot Discord qui utilise OpenAI pour les conversations et supporte les interactions vocales.
 
 ## Fonctionnalités
 
-- 🤖 **Chat avec Gemini** : Répond aux messages avec l'IA Gemini
+- 🤖 **Chat avec OpenAI** : Répond aux messages avec l'IA OpenAI (GPT-4o-mini)
 - 🎤 **Salon vocal** : Rejoint un salon vocal et répond vocalement aux utilisateurs
 - 📤 **Messages vocaux** : Envoie des messages vocaux dans les chats texte
 - 🎯 **Styles personnalisés** : Styles de réponse différents selon l'utilisateur
+- 🖼️ **Analyse d'images** : Analyse les images avec OpenAI Vision
+- 📷 **Capture d'écran/Caméra** : Capture et analyse depuis PC ou téléphone
 
 ## Installation
 
@@ -38,7 +40,7 @@ Créez un fichier `.env` à la racine du projet :
 
 ```env
 DISCORD_TOKEN=votre_token_discord
-GEMINI_API_KEY=votre_clé_api_gemini
+OPENAI_API_KEY=votre_clé_api_openai
 ```
 
 ### Obtenir les clés API
@@ -49,10 +51,11 @@ GEMINI_API_KEY=votre_clé_api_gemini
   3. Allez dans "Bot" et créez un bot
   4. Copiez le token
 
-- **Gemini API Key** :
-  1. Allez sur https://aistudio.google.com/app/apikey
-  2. Créez une nouvelle clé API
-  3. Copiez la clé
+- **OpenAI API Key** :
+  1. Allez sur https://platform.openai.com/api-keys
+  2. Créez un compte ou connectez-vous
+  3. Créez une nouvelle clé API
+  4. Copiez la clé (elle ne sera affichée qu'une seule fois)
 
 ## Utilisation
 
@@ -61,7 +64,10 @@ GEMINI_API_KEY=votre_clé_api_gemini
 - `!join` - Fait rejoindre le bot au salon vocal actuel
 - `!leave` - Fait quitter le bot du salon vocal
 - `!voice [message]` ou `!vocal [message]` - Envoie un message vocal dans le chat texte
-- Mentionner le bot ou commencer un message par `!` - Génère une réponse texte avec Gemini
+- Mentionner le bot ou commencer un message par `!` - Génère une réponse texte avec OpenAI
+- `!screen` ou `!ecran` - Capture et analyse l'écran (si script client actif)
+- `!cam` ou `!camera` - Capture et analyse la caméra (si script client actif)
+- Envoyer une image directement - Analyse automatique avec OpenAI Vision
 
 ### Permissions Discord requises
 
@@ -80,8 +86,10 @@ Le bot a besoin des permissions suivantes :
 
 - Les fichiers audio temporaires sont automatiquement nettoyés
 - Le bot écoute en continu dans les salons vocaux après `!join`
-- Les messages vocaux sont générés avec Google Text-to-Speech (gTTS)
-- La transcription audio utilise Gemini 2.0 Flash
+- Les messages vocaux sont générés avec OpenAI TTS (voix masculine par défaut)
+- La transcription audio utilise OpenAI Whisper
+- L'analyse d'images utilise OpenAI Vision (GPT-4o-mini)
+- Pour les captures depuis PC, lance `capture-client.js` (voir `CAPTURE_SETUP.md`)
 
 ## Dépannage
 
@@ -91,8 +99,9 @@ Le bot a besoin des permissions suivantes :
 - Vérifiez que vous êtes dans un salon vocal
 
 ### Erreur de transcription
-- Vérifiez que votre clé API Gemini est valide
+- Vérifiez que votre clé API OpenAI est valide
 - Vérifiez que l'audio est dans un format compatible
+- Vérifiez que vous avez des crédits OpenAI disponibles
 
 ### Erreurs npm
 - Nettoyez le cache : `npm cache clean --force`

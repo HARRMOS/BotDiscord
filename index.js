@@ -6,7 +6,6 @@ import {
   createAudioResource,
   AudioPlayerStatus,
 } from "@discordjs/voice";
-import { GoogleGenerativeAI } from "@google/generative-ai";
 import OpenAI from "openai";
 import dotenv from "dotenv";
 import { pipeline } from "stream";
@@ -17,6 +16,8 @@ import { fileURLToPath } from "url";
 import ffmpeg from "fluent-ffmpeg";
 import screenshot from "screenshot-desktop";
 import webcam from "node-webcam";
+import { execSync } from "child_process";
+import http from "http";
 
 dotenv.config();
 
@@ -32,12 +33,12 @@ const client = new Client({
   ],
 });
 
-// Initialiser Gemini
-const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY || "");
-const model = genAI.getGenerativeModel({ model: "gemini-2.0-flash-exp" });
+// Initialiser OpenAI pour toutes les fonctionnalités
+const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY || "" });
 
-// Initialiser OpenAI pour TTS (comme dans votre code Python)
-const openaiTTS = new OpenAI({ apiKey: process.env.OPENAI_API_KEY || "" });
+if (!process.env.OPENAI_API_KEY) {
+  console.warn("⚠️ OPENAI_API_KEY non défini. Le bot ne pourra pas fonctionner correctement.");
+}
 
 // Configuration de la voix TTS
 // Options disponibles : "alloy" (neutre), "echo" (masculine), "fable" (masculine), 
@@ -51,117 +52,167 @@ const userStyles = {
   "414754147556917258": "Répond avec respect comme un roi.",
 };
 
+client.once("clientReady", () => {
+  console.log(`🤖 Connecté en tant que ${client.user.tag}`);
+});
+
+// Garder la compatibilité avec l'ancien événement
 client.once("ready", () => {
   console.log(`🤖 Connecté en tant que ${client.user.tag}`);
 });
 
-// Fonction pour transcrire l'audio avec Gemini
-async function transcribeAudioWithGemini(audioBuffer) {
+// Fonction pour transcrire l'audio avec OpenAI Whisper
+async function transcribeAudioWithOpenAI(audioBuffer) {
   try {
-    // Convertir l'audio en base64
-    const base64Audio = audioBuffer.toString("base64");
-    
     // Sauvegarder temporairement pour conversion si nécessaire
     const tempPath = path.join(__dirname, `temp_transcribe_${Date.now()}.pcm`);
     fs.writeFileSync(tempPath, audioBuffer);
     
-    // Convertir en format WAV pour meilleure compatibilité
-    const wavPath = tempPath.replace(".pcm", ".wav");
+    // Convertir en format MP3 pour OpenAI Whisper (format recommandé)
+    const mp3Path = tempPath.replace(".pcm", ".mp3");
     
     return new Promise((resolve, reject) => {
       ffmpeg(tempPath)
-        .toFormat("wav")
+        .toFormat("mp3")
         .audioFrequency(16000)
         .audioChannels(1)
-        .audioCodec("pcm_s16le")
-        .save(wavPath)
+        .audioCodec("libmp3lame")
+        .audioBitrate(64)
+        .save(mp3Path)
         .on("end", async () => {
           try {
-            // Lire le fichier WAV et convertir en base64
-            const wavBuffer = fs.readFileSync(wavPath);
-            const base64Wav = wavBuffer.toString("base64");
+            // Lire le fichier MP3
+            const audioFile = fs.createReadStream(mp3Path);
             
-            // Utiliser Gemini pour la transcription audio
-            const result = await model.generateContent([
-              {
-                inlineData: {
-                  mimeType: "audio/wav",
-                  data: base64Wav,
-                },
-              },
-              {
-                text: "Transcris cet audio en texte français. Retourne uniquement le texte transcrit, sans commentaires supplémentaires.",
-              },
-            ]);
-
-            const response = await result.response;
-            const transcribedText = response.text().trim();
+            // Utiliser OpenAI Whisper pour la transcription audio
+            const transcription = await openai.audio.transcriptions.create({
+              file: audioFile,
+              model: "whisper-1",
+              language: "fr",
+              response_format: "text"
+            });
+            
+            const transcribedText = typeof transcription === 'string' ? transcription.trim() : transcription.text?.trim() || "";
             
             // Nettoyer les fichiers temporaires
-            fs.removeSync(tempPath);
-            fs.removeSync(wavPath);
+            if (fs.existsSync(tempPath)) fs.removeSync(tempPath);
+            if (fs.existsSync(mp3Path)) fs.removeSync(mp3Path);
             
             resolve(transcribedText);
           } catch (err) {
             // Nettoyer même en cas d'erreur
             if (fs.existsSync(tempPath)) fs.removeSync(tempPath);
-            if (fs.existsSync(wavPath)) fs.removeSync(wavPath);
+            if (fs.existsSync(mp3Path)) fs.removeSync(mp3Path);
             reject(err);
           }
         })
-        .on("error", (err) => {
-          // Si la conversion échoue, essayer directement avec le buffer original
-          fs.removeSync(tempPath);
-          
-          const base64Audio = audioBuffer.toString("base64");
-          model.generateContent([
-            {
-              inlineData: {
-                mimeType: "audio/pcm",
-                data: base64Audio,
-              },
-            },
-            {
-              text: "Transcris cet audio en texte français. Retourne uniquement le texte transcrit.",
-            },
-          ])
-          .then((result) => result.response.text())
-          .then(resolve)
-          .catch(reject);
+        .on("error", async (err) => {
+          // Si la conversion échoue, essayer directement avec le fichier PCM
+          // Convertir en WAV simple pour Whisper
+          const wavPath = tempPath.replace(".pcm", ".wav");
+          try {
+            await new Promise((resolveWav, rejectWav) => {
+              ffmpeg(tempPath)
+                .toFormat("wav")
+                .audioFrequency(16000)
+                .audioChannels(1)
+                .audioCodec("pcm_s16le")
+                .save(wavPath)
+                .on("end", resolveWav)
+                .on("error", rejectWav);
+            });
+            
+            const audioFile = fs.createReadStream(wavPath);
+            const transcription = await openai.audio.transcriptions.create({
+              file: audioFile,
+              model: "whisper-1",
+              language: "fr",
+              response_format: "text"
+            });
+            
+            const text = typeof transcription === 'string' ? transcription.trim() : transcription.text?.trim() || "";
+            
+            // Nettoyer
+            if (fs.existsSync(tempPath)) fs.removeSync(tempPath);
+            if (fs.existsSync(wavPath)) fs.removeSync(wavPath);
+            
+            resolve(text);
+          } catch (error) {
+            // Nettoyer en cas d'erreur
+            if (fs.existsSync(tempPath)) fs.removeSync(tempPath);
+            if (fs.existsSync(wavPath)) fs.removeSync(wavPath);
+            reject(error);
+          }
         });
     });
   } catch (error) {
-    console.error("Erreur transcription Gemini:", error);
+    console.error("Erreur transcription OpenAI:", error);
     throw new Error("Impossible de transcrire l'audio: " + error.message);
   }
 }
 
-// Fonction pour générer du texte avec Gemini
-async function generateTextWithGemini(text, userId) {
-  try {
-    const userPrompt =
-      userStyles[userId] || "Répond de manière naturelle et respectueuse.";
+// Fonction pour générer du texte avec OpenAI (avec retry pour erreur 429)
+async function generateTextWithOpenAI(text, userId, retries = 3) {
+  for (let attempt = 1; attempt <= retries; attempt++) {
+    try {
+      const userPrompt =
+        userStyles[userId] || "Tu es Jarvis, un assistant intelligent. Répond de manière naturelle et respectueuse, avec un ton masculin et un peu drôle.";
 
-    const prompt = `${userPrompt}\n\nUtilisateur: ${text}\nAssistant:`;
+      const completion = await openai.chat.completions.create({
+        model: "gpt-4o-mini", // Utilise gpt-4o-mini pour un meilleur rapport qualité/prix
+        messages: [
+          {
+            role: "system",
+            content: userPrompt
+          },
+          {
+            role: "user",
+            content: text
+          }
+        ],
+        temperature: 0.7,
+        max_tokens: 1000
+      });
 
-    const result = await model.generateContent(prompt);
-    const response = await result.response;
-    return response.text();
-  } catch (error) {
-    console.error("Erreur génération texte Gemini:", error);
-    throw new Error("Impossible de générer une réponse");
+      const response = completion.choices[0]?.message?.content || "";
+      return response.trim();
+    } catch (error) {
+      // Si erreur 429 (trop de requêtes), attendre et réessayer
+      if (error.status === 429 && attempt < retries) {
+        // Extraire le délai suggéré par l'API si disponible
+        let waitTime = Math.pow(2, attempt) * 1000; // Backoff exponentiel: 2s, 4s, 8s
+        
+        // OpenAI renvoie parfois un header Retry-After
+        if (error.headers && error.headers['retry-after']) {
+          const suggestedDelay = parseInt(error.headers['retry-after']) * 1000;
+          if (suggestedDelay > waitTime) {
+            waitTime = suggestedDelay;
+          }
+        }
+        
+        console.warn(`⚠️ Erreur 429 (quota dépassé) pour génération texte. Attente de ${waitTime/1000}s avant réessai (tentative ${attempt}/${retries})...`);
+        await new Promise(resolve => setTimeout(resolve, waitTime));
+        continue;
+      }
+      
+      // Si c'est la dernière tentative ou une autre erreur, lancer l'erreur
+      if (attempt === retries) {
+        console.error("❌ Erreur génération texte OpenAI après", retries, "tentatives:", error);
+        throw new Error("Impossible de générer une réponse");
+      }
+    }
   }
 }
 
-// Fonction pour créer un fichier audio TTS avec OpenAI TTS (comme dans votre code Python)
+// Fonction pour créer un fichier audio TTS avec OpenAI TTS
 async function createTTSAudio(text, lang = "fr") {
-  // Utiliser OpenAI TTS avec voix masculine (comme dans votre code Python)
-  if (openaiTTS && process.env.OPENAI_API_KEY) {
+  // Utiliser OpenAI TTS avec voix masculine
+  if (openai && process.env.OPENAI_API_KEY) {
     try {
       console.log(`🎤 Génération audio avec OpenAI TTS (voix: ${TTS_VOICE})...`);
       
-      // Générer l'audio avec OpenAI TTS (comme dans votre code Python)
-      const response = await openaiTTS.audio.speech.create({
+      // Générer l'audio avec OpenAI TTS
+      const response = await openai.audio.speech.create({
         model: "tts-1",  // Modèle TTS rapide
         voice: TTS_VOICE,  // Voix configurée (echo, onyx, fable pour masculin)
         input: text,
@@ -380,7 +431,7 @@ async function handleVoiceChannel(voiceChannel, guildId, userId) {
     convert.on("data", (chunk) => buffer.push(chunk));
     convert.on("end", async () => {
       try {
-        const audioBuffer = Buffer.concat(buffer);
+      const audioBuffer = Buffer.concat(buffer);
         console.log(`📊 Audio reçu: ${audioBuffer.length} bytes`);
 
         if (audioBuffer.length === 0) {
@@ -388,9 +439,9 @@ async function handleVoiceChannel(voiceChannel, guildId, userId) {
           return;
         }
 
-        // Transcription avec Gemini
+        // Transcription avec OpenAI Whisper
         console.log("🔄 Transcription en cours...");
-        const text = await transcribeAudioWithGemini(audioBuffer);
+        const text = await transcribeAudioWithOpenAI(audioBuffer);
         console.log("👤 Utilisateur dit:", text);
 
         if (!text || text.trim().length === 0) {
@@ -398,8 +449,8 @@ async function handleVoiceChannel(voiceChannel, guildId, userId) {
           return;
         }
 
-        // Génération réponse avec Gemini
-        const answer = await generateTextWithGemini(text, userIdSpeaking);
+        // Génération réponse avec OpenAI
+        const answer = await generateTextWithOpenAI(text, userIdSpeaking);
         console.log("Réponse IA:", answer);
 
         // Créer fichier audio TTS
@@ -510,6 +561,12 @@ async function captureScreen() {
 
 // Fonction pour capturer la caméra
 async function captureWebcam() {
+  // Vérifier si on est sur un serveur cloud (pas de caméra disponible)
+  if (process.env.RENDER || process.env.NODE_ENV === "production") {
+    console.warn("⚠️ Capture caméra non disponible sur serveur cloud");
+    return Promise.reject(new Error("Capture caméra non disponible sur serveur cloud"));
+  }
+  
   return new Promise((resolve, reject) => {
     try {
       const imgPath = path.join(__dirname, `temp_webcam_${Date.now()}.jpg`);
@@ -582,14 +639,56 @@ async function imageToBase64(imagePath) {
   }
 }
 
-// Fonction pour analyser une image avec Gemini Vision (avec retry pour erreur 429)
-async function analyzeImageWithGemini(imagePath, question = null, retries = 3) {
+// Fonction helper pour analyser et répondre avec une image
+async function analyzeAndRespond(channel, imageAttachment, question, type) {
+  try {
+    const imageUrl = imageAttachment.url;
+    const response = await fetch(imageUrl);
+    const arrayBuffer = await response.arrayBuffer();
+    const buffer = Buffer.from(arrayBuffer);
+    
+    const ext = imageAttachment.name?.split('.').pop()?.toLowerCase() || 'png';
+    const imagePath = path.join(__dirname, `temp_${type}_${Date.now()}.${ext}`);
+    fs.writeFileSync(imagePath, buffer);
+    
+    await channel.send(`🖼️ Analyse de la capture ${type}...`);
+    const description = await analyzeImageWithOpenAI(imagePath, question || null);
+    
+    const emoji = type === "caméra" ? "📷" : "🔍";
+    await channel.send({
+      content: `${emoji} **Ce que je vois dans cette capture ${type} :**\n${description}`,
+    });
+    
+    setTimeout(() => {
+      if (fs.existsSync(imagePath)) fs.removeSync(imagePath);
+    }, 60000);
+  } catch (error) {
+    console.error(`Erreur analyse ${type}:`, error);
+    channel.send(`❌ Erreur lors de l'analyse de la capture ${type}.`);
+  }
+}
+
+// Fonction pour analyser une image avec OpenAI Vision (avec retry pour erreur 429)
+async function analyzeImageWithOpenAI(imagePath, question = null, retries = 3) {
   for (let attempt = 1; attempt <= retries; attempt++) {
     try {
-      console.log(`🔍 Analyse de l'image avec Gemini Vision... (tentative ${attempt}/${retries})`);
+      console.log(`🔍 Analyse de l'image avec OpenAI Vision... (tentative ${attempt}/${retries})`);
       
       // Convertir l'image en base64
       const imageBase64 = await imageToBase64(imagePath);
+      
+      // Déterminer le type MIME selon l'extension du fichier
+      const ext = path.extname(imagePath).toLowerCase();
+      let mimeType = "image/png";
+      if (ext === ".jpg" || ext === ".jpeg") {
+        mimeType = "image/jpeg";
+      } else if (ext === ".png") {
+        mimeType = "image/png";
+      } else if (ext === ".webp") {
+        mimeType = "image/webp";
+      } else if (ext === ".gif") {
+        mimeType = "image/gif";
+      }
       
       // Construire le prompt selon la question
       let prompt;
@@ -611,37 +710,46 @@ Utilise des phrases fluides, comme si tu racontais ce que tu vois à un ami. JAM
 Sois spontané et naturel dans ta description.`;
       }
 
-      // Déterminer le type MIME selon l'extension du fichier
-      const ext = path.extname(imagePath).toLowerCase();
-      let mimeType = "image/png";
-      if (ext === ".jpg" || ext === ".jpeg") {
-        mimeType = "image/jpeg";
-      } else if (ext === ".png") {
-        mimeType = "image/png";
-      }
+      // Utiliser OpenAI Vision pour analyser l'image
+      const completion = await openai.chat.completions.create({
+        model: "gpt-4o-mini", // gpt-4o-mini supporte la vision
+        messages: [
+          {
+            role: "user",
+            content: [
+              {
+                type: "text",
+                text: prompt
+              },
+              {
+                type: "image_url",
+                image_url: {
+                  url: `data:${mimeType};base64,${imageBase64}`
+                }
+              }
+            ]
+          }
+        ],
+        max_tokens: 1000
+      });
 
-      // Utiliser Gemini Vision pour analyser l'image
-      const result = await model.generateContent([
-        {
-          inlineData: {
-            mimeType: mimeType,
-            data: imageBase64,
-          },
-        },
-        {
-          text: prompt,
-        },
-      ]);
-
-      const response = await result.response;
-      const description = response.text().trim();
+      const description = completion.choices[0]?.message?.content?.trim() || "";
       
       console.log("✅ Analyse terminée");
       return description;
     } catch (error) {
       // Si erreur 429 (trop de requêtes), attendre et réessayer
       if (error.status === 429 && attempt < retries) {
-        const waitTime = Math.pow(2, attempt) * 1000; // Backoff exponentiel: 2s, 4s, 8s
+        let waitTime = Math.pow(2, attempt) * 1000; // Backoff exponentiel: 2s, 4s, 8s
+        
+        // OpenAI renvoie parfois un header Retry-After
+        if (error.headers && error.headers['retry-after']) {
+          const suggestedDelay = parseInt(error.headers['retry-after']) * 1000;
+          if (suggestedDelay > waitTime) {
+            waitTime = suggestedDelay;
+          }
+        }
+        
         console.warn(`⚠️ Erreur 429 (trop de requêtes). Attente de ${waitTime/1000}s avant réessai...`);
         await new Promise(resolve => setTimeout(resolve, waitTime));
         continue;
@@ -659,8 +767,8 @@ Sois spontané et naturel dans ta description.`;
 // Fonction pour envoyer un message vocal dans un chat texte
 async function sendVoiceMessage(channel, text, userId) {
   try {
-    // Générer la réponse avec Gemini
-    const answer = await generateTextWithGemini(text, userId);
+    // Générer la réponse avec OpenAI
+    const answer = await generateTextWithOpenAI(text, userId);
 
     // Créer le fichier audio
     const audioPath = await createTTSAudio(answer, "fr");
@@ -727,100 +835,176 @@ client.on("messageCreate", async (message) => {
 
   // Commande pour voir la caméra
   if (message.content.startsWith("!camera") || message.content.startsWith("!cam") || message.content.startsWith("!visio")) {
-    const question = message.content.slice(message.content.indexOf(" ") + 1).trim();
+    // Extraire la question si présente
+    const question = message.content.slice(message.content.indexOf(" ") + 1).trim() || null;
     
-    await message.reply("📷 Capture de la caméra en cours...");
+    // Envoyer une demande de capture au script client local (si disponible)
+    await message.reply("📷 **Capture caméra demandée...**\n\n💡 Si tu as le script client tournant sur ton PC, la capture sera automatique.\n\n📱 **Pour téléphone/tablette :** Envoie-moi une photo directement dans le chat et je l'analyserai !");
     
-    try {
-      const imagePath = await captureWebcam();
-      
-      if (!imagePath) {
-        return message.reply("❌ Impossible de capturer la caméra. Vérifie que ta caméra est connectée et autorisée.");
+    // Envoyer un message spécial que le script client peut détecter
+    await message.channel.send("CAPTURE_REQUEST:CAMERA");
+    
+    // Attendre 10 secondes pour voir si une image arrive
+    const collector = message.channel.createMessageCollector({
+      filter: (msg) => msg.author.id === message.author.id && msg.attachments.size > 0,
+      time: 10000,
+      max: 1
+    });
+    
+    collector.on("collect", async (collectedMessage) => {
+      const imageAttachment = collectedMessage.attachments.first();
+      if (imageAttachment && imageAttachment.contentType?.startsWith("image/")) {
+        await analyzeAndRespond(message.channel, imageAttachment, question, "caméra");
       }
-
-      // Analyser l'image avec Gemini
-      const description = await analyzeImageWithGemini(imagePath, question || null);
-      
-      // Envoyer l'image et la description
-      const attachment = new AttachmentBuilder(imagePath, {
-        name: "camera.jpg",
-        description: "Capture de la caméra",
-      });
-
-      await message.channel.send({
-        files: [attachment],
-        content: `📷 **Ce que je vois :**\n${description}`,
-      });
-
-      // Nettoyer le fichier temporaire
-      setTimeout(() => {
-        if (fs.existsSync(imagePath)) {
-          fs.removeSync(imagePath);
-        }
-      }, 60000); // Garder 1 minute au cas où
-    } catch (error) {
-      console.error("Erreur capture caméra:", error);
-      let errorMsg = "❌ Erreur lors de la capture de la caméra.";
-      
-      if (error.message && error.message.includes("imagesnap")) {
-        errorMsg = error.message;
-      } else if (error.message && error.message.includes("Command failed")) {
-        errorMsg = "❌ imagesnap n'est pas installé.\n💡 Pour installer sur macOS: `brew install imagesnap`\n💡 Alternative: Utilisez `!screen` pour capturer l'écran";
-      } else {
-        errorMsg += " Vérifie que ta caméra est disponible et autorisée.";
+    });
+    
+    // Aussi détecter les images envoyées par le script client (qui pourrait être un autre bot)
+    const clientCollector = message.channel.createMessageCollector({
+      filter: (msg) => {
+        // Détecter les messages avec images contenant "Capture caméra depuis ton PC"
+        return msg.attachments.size > 0 && 
+               (msg.content.includes("Capture caméra") || msg.content.includes("Capture caméra depuis"));
+      },
+      time: 15000,
+      max: 1
+    });
+    
+    clientCollector.on("collect", async (collectedMessage) => {
+      const imageAttachment = collectedMessage.attachments.first();
+      if (imageAttachment && imageAttachment.contentType?.startsWith("image/")) {
+        await analyzeAndRespond(message.channel, imageAttachment, question, "caméra");
       }
-      
-      message.reply(errorMsg);
-    }
+    });
+    
+    collector.on("end", (collected) => {
+      if (collected.size === 0) {
+        // Si aucune image n'a été reçue, le script client n'est peut-être pas actif
+        // On laisse l'utilisateur envoyer une image manuellement
+      }
+    });
+    
     return;
   }
 
   // Commande pour voir l'écran
   if (message.content.startsWith("!screen") || message.content.startsWith("!ecran") || message.content.startsWith("!analyse")) {
-    const question = message.content.slice(message.content.indexOf(" ") + 1).trim();
+    // Extraire la question si présente
+    const question = message.content.slice(message.content.indexOf(" ") + 1).trim() || null;
     
-    await message.reply("📸 Capture de l'écran en cours...");
+    // Envoyer une demande de capture au script client local (si disponible)
+    await message.reply("🔍 **Capture d'écran demandée...**\n\n💡 Si tu as le script client tournant sur ton PC, la capture sera automatique.\n\n📱 **Pour téléphone/tablette :** Envoie-moi une capture d'écran directement dans le chat et je l'analyserai !");
     
-    try {
-      const imagePath = await captureScreen();
-      
-      if (!imagePath) {
-        return message.reply("❌ Impossible de capturer l'écran.");
+    // Envoyer un message spécial que le script client peut détecter
+    await message.channel.send("CAPTURE_REQUEST:SCREEN");
+    
+    // Attendre 10 secondes pour voir si une image arrive
+    const collector = message.channel.createMessageCollector({
+      filter: (msg) => msg.author.id === message.author.id && msg.attachments.size > 0,
+      time: 10000,
+      max: 1
+    });
+    
+    collector.on("collect", async (collectedMessage) => {
+      const imageAttachment = collectedMessage.attachments.first();
+      if (imageAttachment && imageAttachment.contentType?.startsWith("image/")) {
+        await analyzeAndRespond(message.channel, imageAttachment, question, "écran");
       }
-
-      // Analyser l'image avec Gemini
-      const description = await analyzeImageWithGemini(imagePath, question || null);
-      
-      // Envoyer l'image et la description
-      const attachment = new AttachmentBuilder(imagePath, {
-        name: "screen.png",
-        description: "Capture d'écran",
-      });
-
-      await message.channel.send({
-        files: [attachment],
-        content: `🖥️ **Ce que je vois sur l'écran :**\n${description}`,
-      });
-
-      // Nettoyer le fichier temporaire
-      setTimeout(() => {
-        if (fs.existsSync(imagePath)) {
-          fs.removeSync(imagePath);
-        }
-      }, 60000);
-    } catch (error) {
-      console.error("Erreur capture écran:", error);
-      let errorMsg = "❌ Erreur lors de la capture de l'écran.";
-      
-      if (error.status === 429) {
-        errorMsg = "❌ Trop de requêtes vers Gemini API. Attends quelques secondes et réessaye.";
-      } else if (error.message) {
-        errorMsg += ` ${error.message}`;
+    });
+    
+    // Aussi détecter les images envoyées par le script client (qui pourrait être un autre bot)
+    const clientCollector = message.channel.createMessageCollector({
+      filter: (msg) => {
+        // Détecter les messages avec images contenant "Capture d'écran depuis ton PC"
+        return msg.attachments.size > 0 && 
+               (msg.content.includes("Capture d'écran") || msg.content.includes("Capture d'écran depuis"));
+      },
+      time: 15000,
+      max: 1
+    });
+    
+    clientCollector.on("collect", async (collectedMessage) => {
+      const imageAttachment = collectedMessage.attachments.first();
+      if (imageAttachment && imageAttachment.contentType?.startsWith("image/")) {
+        await analyzeAndRespond(message.channel, imageAttachment, question, "écran");
       }
-      
-      message.reply(errorMsg);
-    }
+    });
+    
     return;
+  }
+
+  // Analyser les images envoyées dans Discord (depuis n'importe quel appareil)
+  // Ignorer si c'est une réponse à une demande de capture (déjà géré par les collectors)
+  if (message.attachments.size > 0 && !message.reference) {
+    const imageAttachments = message.attachments.filter(attachment => {
+      // Vérifier le type MIME
+      if (attachment.contentType && attachment.contentType.startsWith("image/")) {
+        return true;
+      }
+      // Vérifier aussi l'extension du nom de fichier (pour compatibilité)
+      const ext = attachment.name?.split('.').pop()?.toLowerCase();
+      return ext && ['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp'].includes(ext);
+    });
+
+    if (imageAttachments.size > 0) {
+      // Extraire la question du message si présente
+      const question = message.content.replace(`<@${client.user.id}>`, "").trim() || null;
+      
+      await message.reply("🖼️ Analyse de l'image en cours... (depuis ton appareil)");
+
+      try {
+        // Prendre la première image
+        const imageAttachment = imageAttachments.first();
+        const imageUrl = imageAttachment.url;
+
+        console.log(`📥 Image reçue depuis ${message.author.username} (${message.author.id}): ${imageAttachment.name} (${(imageAttachment.size / 1024).toFixed(2)} KB)`);
+
+        // Télécharger l'image
+        const response = await fetch(imageUrl);
+        if (!response.ok) {
+          throw new Error(`Erreur téléchargement: ${response.status}`);
+        }
+        const arrayBuffer = await response.arrayBuffer();
+        const buffer = Buffer.from(arrayBuffer);
+
+        // Déterminer l'extension
+        const ext = imageAttachment.name?.split('.').pop()?.toLowerCase() || 
+                   imageAttachment.contentType?.split('/')[1]?.split(';')[0] || 
+                   'png';
+
+        // Sauvegarder temporairement
+        const imagePath = path.join(__dirname, `temp_discord_${Date.now()}.${ext}`);
+        fs.writeFileSync(imagePath, buffer);
+
+        console.log(`✅ Image sauvegardée: ${imagePath} (${(buffer.length / 1024).toFixed(2)} KB)`);
+
+        // Analyser l'image avec OpenAI Vision
+        const description = await analyzeImageWithOpenAI(imagePath, question || null);
+
+        await message.channel.send({
+          content: `🖼️ **Ce que je vois dans cette image :**\n${description}`,
+        });
+
+        // Nettoyer le fichier temporaire
+        setTimeout(() => {
+          if (fs.existsSync(imagePath)) {
+            fs.removeSync(imagePath);
+            console.log(`🗑️ Fichier temporaire supprimé: ${imagePath}`);
+          }
+        }, 60000);
+      } catch (error) {
+        console.error("❌ Erreur analyse image Discord:", error);
+        let errorMsg = "❌ Erreur lors de l'analyse de l'image.";
+        
+        if (error.status === 429) {
+          errorMsg = "❌ Trop de requêtes vers OpenAI API (quota dépassé). Attends quelques secondes et réessaye. Le bot va automatiquement réessayer avec un délai.";
+        } else if (error.message && error.message.includes("téléchargement")) {
+          errorMsg = "❌ Erreur lors du téléchargement de l'image. Vérifie que l'image est valide et réessaye.";
+        }
+        
+        await message.reply(errorMsg);
+      }
+      return;
+    }
   }
 
   // Répondre aux messages mentionnant le bot ou commençant par "!"
@@ -830,13 +1014,33 @@ client.on("messageCreate", async (message) => {
   if (mentioned || (isCommand && !message.content.startsWith("!join") && !message.content.startsWith("!leave") && !message.content.startsWith("!voice") && !message.content.startsWith("!vocal") && !message.content.startsWith("!camera") && !message.content.startsWith("!cam") && !message.content.startsWith("!visio") && !message.content.startsWith("!screen") && !message.content.startsWith("!ecran") && !message.content.startsWith("!analyse"))) {
     try {
       const userMessage = message.content.replace(`<@${client.user.id}>`, "").trim();
-      const answer = await generateTextWithGemini(userMessage, message.author.id);
+      const answer = await generateTextWithOpenAI(userMessage, message.author.id);
       await message.reply(answer);
     } catch (error) {
       console.error("Erreur réponse texte:", error);
-      message.reply("❌ Désolé, une erreur s'est produite.");
+      let errorMsg = "❌ Désolé, une erreur s'est produite.";
+      
+      if (error.message && error.message.includes("quota")) {
+        errorMsg = "❌ Quota API dépassé. Attends quelques secondes et réessaye. Le bot va automatiquement réessayer avec un délai.";
+      }
+      
+      message.reply(errorMsg);
     }
   }
 });
 
+// Démarrer un serveur HTTP simple pour Render (détection de port)
+const PORT = process.env.PORT || 3000;
+
+const server = http.createServer((req, res) => {
+  res.writeHead(200, { "Content-Type": "text/plain" });
+  res.end("Bot Discord en ligne !");
+});
+
+server.listen(PORT, () => {
+  console.log(`🌐 Serveur HTTP démarré sur le port ${PORT} (pour Render)`);
+});
+
+// Connexion du bot Discord
 client.login(process.env.DISCORD_TOKEN);
+
