@@ -98,3 +98,4 @@ Le bot a besoin des permissions suivantes :
 - Nettoyez le cache : `npm cache clean --force`
 - Réinstallez : `rm -rf node_modules package-lock.json && npm install`
 
+
