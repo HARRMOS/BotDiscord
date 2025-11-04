@@ -121,6 +121,9 @@ client.on("messageCreate", async (message) => {
   // Ignorer les messages du bot lui-même
   if (message.author.id === client.user.id) return;
   
+  // Log pour déboguer
+  console.log(`📨 Message reçu de ${message.author.tag} (${message.author.bot ? 'bot' : 'utilisateur'}): ${message.content.substring(0, 50)}...`);
+  
   // Détecter les demandes spéciales du bot principal ou les messages contenant la commande
   const content = message.content;
   
@@ -170,7 +173,9 @@ client.on("messageCreate", async (message) => {
       (content.includes("!camera") && message.author.bot)) {
     
     try {
-      console.log("📷 Demande de capture caméra détectée");
+      console.log("📷 ✅ Demande de capture caméra détectée !");
+      console.log(`📝 Message complet: "${content}"`);
+      console.log(`👤 Auteur: ${message.author.tag} (bot: ${message.author.bot})`);
       const imgPath = await captureWebcam();
       
       const attachment = new AttachmentBuilder(imgPath, {
@@ -178,12 +183,13 @@ client.on("messageCreate", async (message) => {
         description: "Capture caméra depuis PC local"
       });
       
-      await message.channel.send({
+      const sentMessage = await message.channel.send({
         content: "📷 **Capture caméra depuis ton PC :**",
         files: [attachment]
       });
       
-      console.log("✅ Capture caméra envoyée");
+      console.log("✅ Capture caméra envoyée avec succès !");
+      console.log(`📤 Message envoyé dans le canal: ${message.channel.name}`);
       
       // Nettoyer après 30 secondes
       setTimeout(() => {

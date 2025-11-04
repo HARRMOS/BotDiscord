@@ -797,7 +797,16 @@ async function sendVoiceMessage(channel, text, userId) {
 }
 
 client.on("messageCreate", async (message) => {
-  if (message.author.bot) return;
+  // Permettre la détection des captures du script client (même si c'est un bot)
+  // On les gérera dans les collectors spécifiques pour les commandes !screen et !cam
+  const isClientCapture = message.author.bot && 
+                         message.attachments.size > 0 && 
+                         (message.content.includes("Capture") || message.content.includes("depuis ton PC"));
+  
+  // Ignorer les autres messages de bots
+  if (message.author.bot && !isClientCapture) {
+    return;
+  }
 
   // Commande pour rejoindre un salon vocal
   if (message.content.startsWith("!join")) {
@@ -838,16 +847,67 @@ client.on("messageCreate", async (message) => {
     // Extraire la question si présente
     const question = message.content.slice(message.content.indexOf(" ") + 1).trim() || null;
     
-    // Envoyer une demande de capture au script client local (si disponible)
-    await message.reply("📷 **Capture caméra demandée...**\n\n💡 Si tu as le script client tournant sur ton PC, la capture sera automatique.\n\n📱 **Pour téléphone/tablette :** Envoie-moi une photo directement dans le chat et je l'analyserai !");
+    // Vérifier si on peut capturer directement (pas sur serveur cloud)
+    if (!process.env.RENDER && process.env.NODE_ENV !== "production") {
+      // Capturer directement depuis la caméra
+      await message.reply("📷 **Capture de la caméra en cours...**");
+      
+      try {
+        const imgPath = await captureWebcam();
+        
+        if (imgPath && fs.existsSync(imgPath)) {
+          // Envoyer l'image dans le canal
+          const attachment = new AttachmentBuilder(imgPath, {
+            name: `webcam_${Date.now()}.jpg`,
+            description: "Capture caméra"
+          });
+          
+          await message.channel.send({
+            content: "📷 **Capture caméra :**",
+            files: [attachment]
+          });
+          
+          // Analyser l'image
+          await message.channel.send("🖼️ Analyse de la capture caméra...");
+          const description = await analyzeImageWithOpenAI(imgPath, question || null);
+          
+          await message.channel.send({
+            content: `📷 **Ce que je vois dans cette capture caméra :**\n${description}`,
+          });
+          
+          // Nettoyer après 30 secondes
+          setTimeout(() => {
+            if (fs.existsSync(imgPath)) {
+              fs.removeSync(imgPath);
+            }
+          }, 30000);
+        } else {
+          throw new Error("Fichier de capture non créé");
+        }
+      } catch (error) {
+        console.error("❌ Erreur capture caméra:", error);
+        let errorMsg = "❌ Erreur lors de la capture caméra. ";
+        
+        if (error.message && error.message.includes("imagesnap")) {
+          errorMsg += "Sur macOS, installe imagesnap : `brew install imagesnap`";
+        } else if (error.message && error.message.includes("caméra")) {
+          errorMsg += "Vérifie que ta caméra est disponible et réessaye.";
+        } else {
+          errorMsg += "Tu peux aussi envoyer une photo directement dans le chat et je l'analyserai !";
+        }
+        
+        await message.reply(errorMsg);
+      }
+      return;
+    }
     
-    // Envoyer un message spécial que le script client peut détecter
-    await message.channel.send("CAPTURE_REQUEST:CAMERA");
+    // Si sur serveur cloud, suggérer d'envoyer une photo
+    await message.reply("📷 **Capture caméra**\n\n⚠️ Je ne peux pas accéder à la caméra depuis le serveur.\n\n💡 **Solution :** Envoie-moi une photo directement dans le chat et je l'analyserai automatiquement !");
     
-    // Attendre 10 secondes pour voir si une image arrive
+    // Attendre une image de l'utilisateur
     const collector = message.channel.createMessageCollector({
       filter: (msg) => msg.author.id === message.author.id && msg.attachments.size > 0,
-      time: 10000,
+      time: 30000,
       max: 1
     });
     
@@ -855,31 +915,6 @@ client.on("messageCreate", async (message) => {
       const imageAttachment = collectedMessage.attachments.first();
       if (imageAttachment && imageAttachment.contentType?.startsWith("image/")) {
         await analyzeAndRespond(message.channel, imageAttachment, question, "caméra");
-      }
-    });
-    
-    // Aussi détecter les images envoyées par le script client (qui pourrait être un autre bot)
-    const clientCollector = message.channel.createMessageCollector({
-      filter: (msg) => {
-        // Détecter les messages avec images contenant "Capture caméra depuis ton PC"
-        return msg.attachments.size > 0 && 
-               (msg.content.includes("Capture caméra") || msg.content.includes("Capture caméra depuis"));
-      },
-      time: 15000,
-      max: 1
-    });
-    
-    clientCollector.on("collect", async (collectedMessage) => {
-      const imageAttachment = collectedMessage.attachments.first();
-      if (imageAttachment && imageAttachment.contentType?.startsWith("image/")) {
-        await analyzeAndRespond(message.channel, imageAttachment, question, "caméra");
-      }
-    });
-    
-    collector.on("end", (collected) => {
-      if (collected.size === 0) {
-        // Si aucune image n'a été reçue, le script client n'est peut-être pas actif
-        // On laisse l'utilisateur envoyer une image manuellement
       }
     });
     
@@ -895,12 +930,26 @@ client.on("messageCreate", async (message) => {
     await message.reply("🔍 **Capture d'écran demandée...**\n\n💡 Si tu as le script client tournant sur ton PC, la capture sera automatique.\n\n📱 **Pour téléphone/tablette :** Envoie-moi une capture d'écran directement dans le chat et je l'analyserai !");
     
     // Envoyer un message spécial que le script client peut détecter
-    await message.channel.send("CAPTURE_REQUEST:SCREEN");
+    const requestMessage = await message.channel.send("CAPTURE_REQUEST:SCREEN");
     
-    // Attendre 10 secondes pour voir si une image arrive
+    // Créer un collector qui attend les images (utilisateur ou script client)
     const collector = message.channel.createMessageCollector({
-      filter: (msg) => msg.author.id === message.author.id && msg.attachments.size > 0,
-      time: 10000,
+      filter: (msg) => {
+        // Accepter les images de l'utilisateur
+        if (msg.author.id === message.author.id && msg.attachments.size > 0) {
+          return true;
+        }
+        // Accepter les images du script client (bot avec message contenant "Capture")
+        if (msg.author.bot && msg.attachments.size > 0) {
+          const hasImage = msg.attachments.first()?.contentType?.startsWith("image/");
+          const isFromClient = msg.content.includes("Capture d'écran") || 
+                              msg.content.includes("Capture d'écran depuis") ||
+                              msg.content.includes("Capture caméra depuis");
+          return hasImage && isFromClient;
+        }
+        return false;
+      },
+      time: 15000, // Augmenter à 15 secondes pour laisser le temps au script client
       max: 1
     });
     
@@ -911,21 +960,10 @@ client.on("messageCreate", async (message) => {
       }
     });
     
-    // Aussi détecter les images envoyées par le script client (qui pourrait être un autre bot)
-    const clientCollector = message.channel.createMessageCollector({
-      filter: (msg) => {
-        // Détecter les messages avec images contenant "Capture d'écran depuis ton PC"
-        return msg.attachments.size > 0 && 
-               (msg.content.includes("Capture d'écran") || msg.content.includes("Capture d'écran depuis"));
-      },
-      time: 15000,
-      max: 1
-    });
-    
-    clientCollector.on("collect", async (collectedMessage) => {
-      const imageAttachment = collectedMessage.attachments.first();
-      if (imageAttachment && imageAttachment.contentType?.startsWith("image/")) {
-        await analyzeAndRespond(message.channel, imageAttachment, question, "écran");
+    collector.on("end", (collected) => {
+      if (collected.size === 0) {
+        // Si aucune image n'a été reçue, le script client n'est peut-être pas actif
+        // On laisse l'utilisateur envoyer une image manuellement
       }
     });
     
